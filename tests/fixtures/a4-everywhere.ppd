@@ -1,0 +1,12 @@
+*PPD-Adobe: "4.3"
+*% A trimmed copy of a healthy IPP Everywhere driver file.
+*NickName: "Example - IPP Everywhere"
+*cupsLanguages: "en_US"
+*OpenUI *PageSize: PickOne
+*DefaultPageSize: A4
+*PageSize A4: "<</PageSize[595.275590551181 841.889763779528]>>setpagedevice"
+*PageSize A5: "<</PageSize[419.527559055118 595.275590551181]>>setpagedevice"
+*PageSize EnvDL: "<</PageSize[311.811023622047 623.622047244094]>>setpagedevice"
+*PageSize Legal: "<</PageSize[612 1008]>>setpagedevice"
+*PageSize Letter: "<</PageSize[612 792]>>setpagedevice"
+*CloseUI: *PageSize

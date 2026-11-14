@@ -1,0 +1,29 @@
+# airprint-doctor CI: lint the shell, run the tests on a real Mac.
+# © 2026 Aleksandrs Kļaviņš · alexander.klavinsh@gmail.com · MIT licence
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: shellcheck --severity=warning -x airprint-doctor tests/test.sh
+
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: bash tests/test.sh
+      - name: Runs cleanly on a Mac with no printers
+        run: |
+          ./airprint-doctor --timeout 2 || rc=$?
+          [ "${rc:-0}" -lt 2 ]
+      - name: Help and version
+        run: ./airprint-doctor --help && ./airprint-doctor --version

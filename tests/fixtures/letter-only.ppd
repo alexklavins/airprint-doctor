@@ -1,0 +1,18 @@
+*PPD-Adobe: "4.3"
+*% A trimmed copy of the driver file macOS built for a printer that sent a
+*% broken language code: no paper list, so Letter only.
+*% PPD created by ipp2ppd (v3:Feb 12 2022)
+*NickName: "Example-AirPrint"
+*% WARNING no printer-strings for the language "en"
+*cupsLanguages: "en"
+*APAirPrint: True
+*APPrinterIconPath: "/Library/Printers/Icons/EXAMPLE.icns"
+*% WARNING there are no paper sizes. Generating letter as a placeholder.
+*OpenUI *PageSize: PickOne
+*DefaultPageSize: Letter
+*PageSize Letter: "<</PageSize[612 792]/ImagingBBox null>>setpagedevice"
+*CloseUI: *PageSize
+*DefaultDuplex: DuplexNoTumble
+*APScannerUUID: "00000000-0000-0000-0000-000000000000"
+*APICADriver: True
+*APScannerModulePath: "/Library/Image Capture/Devices/Example Scanner.app"

@@ -1,0 +1,13 @@
+"get-printer-attributes.test":
+    Get printer attributes using get-printer-attributes                  [FAIL]
+        RECEIVED: 1234 bytes in response
+        status-code = successful-ok (successful-ok)
+        attributes-charset (charset) = utf-8
+        attributes-natural-language (naturalLanguage) = en-  
+        printer-state (enum) = idle
+        printer-state-reasons (keyword) = none
+        media-default (keyword) = iso_a4_210x297mm
+        media-supported (1setOf keyword) = custom_min_76.2x127mm,custom_max_216x355.6mm,iso_a4_210x297mm,iso_a5_148x210mm,na_letter_8.5x11in
+        natural-language-configured (naturalLanguage) = en-  
+        printer-dns-sd-name (nameWithoutLanguage) = Canon MF645C (1a:2b:3c) (1a:2b:3c)
+        printer-firmware-string-version (textWithoutLanguage) = 08.02
