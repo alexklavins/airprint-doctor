@@ -950,7 +950,7 @@ redact() {
 	# part of "Office_2".
 	for q in $(list_queues | awk '{ print length($0) " " $0 }' | sort -rn | cut -d" " -f2-); do
 		esc=$(printf '%s' "$q" | sed 's/[][\.*^$/]/\\&/g')
-		args+=(-e "s/[[:<:]]$esc[[:>:]]/printer-$i/g")
+		args+=(-e "s/[[:<:]]${esc}[[:>:]]/printer-${i}/g")
 		i=$((i + 1))
 	done
 	# Queue names go first, before the general rules below change them.

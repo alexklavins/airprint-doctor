@@ -115,6 +115,8 @@ same "redact mac tag" "$(printf '"Canon MF645C (1a:2b:3c)"' | redact)" '"Canon M
 same "redact host" "$(printf 'ipp://Canon1a2b3c.local:631/ipp/print' | redact)" "ipp://<printer>.local:631/ipp/print"
 same "redact uuid" "$(printf 'uuid=1f2e3d4c-5b6a-11d8-8020-0a1b2c3d4e5f' | redact)" "uuid=<uuid>"
 same "redact queue name" "$(printf 'Kitchen_Printer  (Canon)' | redact)" "printer-1  (Canon)"
+# The ~ here is the text we expect back, not a path to expand.
+# shellcheck disable=SC2088
 same "redact home" "$(printf '%s/Library' "$HOME" | redact)" "~/Library"
 list_queues() { printf 'Office\nOffice_2\n'; }
 same "redact overlapping names" "$(printf 'Office and Office_2' | redact)" "printer-2 and printer-1"
