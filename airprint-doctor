@@ -1,0 +1,1035 @@
+#!/bin/bash
+#
+# airprint-doctor: finds and fixes the usual reasons an AirPrint printer
+# stops working on a Mac.
+#
+# © 2026 Aleksandrs Kļaviņš · alexander.klavinsh@gmail.com
+# MIT licence (see LICENSE) · https://github.com/alexklavins/airprint-doctor
+#
+# It only looks unless you run it with --fix. Even then it asks before each
+# change and saves a backup first, so --undo can put things back.
+# It uses only commands that come with macOS: lpstat, lpadmin, lpoptions,
+# ippfind, ipptool, cupsenable, cupsaccept, cancel, defaults and nc.
+
+VERSION="1.0.0"
+
+# Make the print commands answer in English. We read their text back, so it
+# has to look the same on every Mac whatever language the Mac is set to.
+export LC_ALL=C LANG=C
+
+MODE="check"          # check, fix, undo or report
+ASSUME_YES=0
+ONLY_QUEUE=""
+TIMEOUT=5
+# Where backups go. AIRPRINT_DOCTOR_BACKUPS can point it elsewhere, for
+# example when an admin runs it across many Macs.
+BACKUP_ROOT="${AIRPRINT_DOCTOR_BACKUPS:-$HOME/Library/Application Support/airprint-doctor/backups}"
+BACKUP_DIR=""
+TMPD=""
+FOUND=""              # file with one line per printer service seen on the network
+ATTRS=""              # file with the printer's own answer about itself
+PROBLEMS=0
+FIXED=0
+TIPS=0
+IS_PROBLEM=0          # was the last thing printed a problem (so a fix counts)?
+SHARING_ON=0
+SEEN=()               # "printer id|queue" pairs, to spot two queues for one printer
+
+BOLD="" DIM="" RED="" GREEN="" YELLOW="" BLUE="" RESET=""
+
+usage() {
+	cat <<EOF
+airprint-doctor $VERSION
+Finds and fixes the usual reasons an AirPrint printer stops working on a Mac.
+
+Usage:
+  airprint-doctor              look only, change nothing
+  airprint-doctor --fix        offer a fix for each problem, asking first
+  airprint-doctor --undo       put back the settings saved before the last fix
+  airprint-doctor --report     the same checks with addresses and names removed,
+                               safe to paste into a forum post or GitHub issue
+
+Options:
+  -p, --printer NAME   check only this queue (the name lpstat -v shows)
+  -t, --timeout SEC    how long to look for printers on the network (default 5)
+  -y, --yes            with --fix: say yes to every fix except cancelling jobs
+      --no-color       plain output
+  -h, --help           this text
+  -V, --version        print the version
+
+Exit status: 0 nothing wrong, 1 problems found or left over, 2 could not run.
+EOF
+}
+
+# --- output ---
+
+setup_colors() {
+	if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "$MODE" != report ]; then
+		BOLD=$'\033[1m' DIM=$'\033[2m' RED=$'\033[31m' GREEN=$'\033[32m'
+		YELLOW=$'\033[33m' BLUE=$'\033[34m' RESET=$'\033[0m'
+	fi
+}
+
+say()     { printf '%s\n' "$*"; }
+detail()  { printf '      %s\n' "$*"; }
+heading() { printf '\n%s%s%s%s\n' "$BOLD" "$1" "$RESET" "${2:+  $DIM$2$RESET}"; }
+ok()      { IS_PROBLEM=0; printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
+problem() { IS_PROBLEM=1; PROBLEMS=$((PROBLEMS + 1)); printf '  %s✗%s %s\n' "$RED" "$RESET" "$*"; }
+warn()    { IS_PROBLEM=1; PROBLEMS=$((PROBLEMS + 1)); printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
+tip()     { IS_PROBLEM=0; TIPS=$((TIPS + 1)); printf '  %s·%s %s\n' "$BLUE" "$RESET" "$*"; }
+
+# Called after a fix worked. Only fixes for real problems lower the count;
+# optional tips that were applied don't.
+fixed() {
+	printf '      %s✓ %s%s\n' "$GREEN" "$*" "$RESET"
+	if [ "$IS_PROBLEM" = 1 ]; then
+		PROBLEMS=$((PROBLEMS - 1))
+		FIXED=$((FIXED + 1))
+		IS_PROBLEM=0
+	fi
+}
+
+# "Fix:" for problems, "Optional:" for tips, so it is clear what is needed.
+fix_label() { if [ "$IS_PROBLEM" = 1 ]; then printf 'Fix'; else printf 'Optional'; fi; }
+
+# --- asking before changing anything ---
+
+# Ask a yes/no question on the keyboard. Reads from /dev/tty so it still
+# works when the script itself arrives through a pipe (curl ... | bash).
+ask() {
+	local reply=""
+	if ! { : </dev/tty; } 2>/dev/null; then
+		printf '      → %s skipped (no keyboard to ask on)\n' "$1"
+		return 1
+	fi
+	printf '      %s→ %s [y/N]%s ' "$BOLD" "$1" "$RESET" >/dev/tty
+	read -r reply </dev/tty || reply=""
+	case "$reply" in [yY] | [yY][eE][sS]) return 0 ;; esac
+	return 1
+}
+
+# Offer a fix. Only in --fix mode. --yes answers for the person, but only
+# for real problems: optional changes still need a typed yes.
+offer() {
+	[ "$MODE" = fix ] || return 1
+	if [ "$ASSUME_YES" = 1 ] && [ "$IS_PROBLEM" = 0 ]; then
+		printf "      → %s skipped (optional, and --yes only answers for problems)\n" "$1"
+		return 1
+	fi
+	if [ "$ASSUME_YES" = 1 ]; then
+		printf '      → %s yes (--yes)\n' "$1"
+		return 0
+	fi
+	ask "$1"
+}
+
+# Same, for things that can't be taken back (cancelling jobs): --yes never
+# answers these, the person has to type y.
+offer_careful() {
+	[ "$MODE" = fix ] || return 1
+	ask "$1"
+}
+
+# Let the person pick one item from a numbered list; prints the chosen item.
+choose() {
+	local prompt=$1 reply="" i=1 item
+	shift
+	[ "$MODE" = fix ] || return 1
+	if [ $# -eq 1 ]; then
+		offer "$prompt: $1?" >&2 && { printf '%s' "$1"; return 0; }
+		return 1
+	fi
+	if [ "$ASSUME_YES" = 1 ]; then
+		printf '      → %s: more than one choice, so skipped with --yes\n' "$prompt" >&2
+		return 1
+	fi
+	{ : </dev/tty; } 2>/dev/null || return 1
+	printf '      %s:\n' "$prompt" >/dev/tty
+	for item in "$@"; do
+		printf '        %d) %s\n' "$i" "$item" >/dev/tty
+		i=$((i + 1))
+	done
+	printf '      %s→ number, or Enter to skip:%s ' "$BOLD" "$RESET" >/dev/tty
+	read -r reply </dev/tty || reply=""
+	case "$reply" in '' | *[!0-9]*) return 1 ;; esac
+	[ "$reply" -ge 1 ] && [ "$reply" -le $# ] || return 1
+	shift $((reply - 1))
+	printf '%s' "$1"
+}
+
+# Run a command that changes something. Shows its error if it fails and
+# writes it to the backup's change log if it works.
+run() {
+	local out rc
+	out=$("$@" 2>&1)
+	rc=$?
+	if [ $rc -ne 0 ]; then
+		printf '      %s✗ This command failed:%s %s\n' "$RED" "$RESET" "$*"
+		printf '%s\n' "$out" | sed 's/^/        /'
+		case "$out" in
+		*orbidden* | *nauthorized* | *"not allowed"*)
+			detail "Changing printers needs an administrator account. Run it again from one." ;;
+		esac
+		return 1
+	fi
+	if [ -n "$BACKUP_DIR" ]; then
+		printf '%s  %s\n' "$(date '+%F %T')" "$*" >>"$BACKUP_DIR/changes.log"
+	fi
+	return 0
+}
+
+# --- backups, so --undo can put things back ---
+
+start_backup() {
+	[ -n "$BACKUP_DIR" ] && return 0
+	BACKUP_DIR="$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)"
+	if ! mkdir -p "$BACKUP_DIR"; then
+		problem "Could not create the backup folder, so nothing was changed: $BACKUP_DIR"
+		BACKUP_DIR=""
+		return 1
+	fi
+	printf 'Saved by airprint-doctor %s on %s, before it changed anything.\n' \
+		"$VERSION" "$(date)" >"$BACKUP_DIR/README.txt"
+}
+
+# Save how a queue looks before the first change to it in this run.
+backup_queue() {
+	local q=$1
+	start_backup || return 1
+	[ -f "$BACKUP_DIR/queue-$q.uri" ] && return 0
+	queue_uri "$q" >"$BACKUP_DIR/queue-$q.uri"
+	queue_opt "$q" printer-is-shared >"$BACKUP_DIR/queue-$q.shared"
+	if [ -r "/etc/cups/ppd/$q.ppd" ]; then
+		cp "/etc/cups/ppd/$q.ppd" "$BACKUP_DIR/queue-$q.ppd"
+	fi
+	return 0
+}
+
+# Save the Mac's own printing settings (default printer and friends).
+backup_mac_settings() {
+	start_backup || return 1
+	[ -f "$BACKUP_DIR/mac-settings.saved" ] && return 0
+	defaults export org.cups.PrintingPrefs "$BACKUP_DIR/PrintingPrefs.plist" 2>/dev/null
+	if [ -f "$HOME/.cups/lpoptions" ]; then
+		cp "$HOME/.cups/lpoptions" "$BACKUP_DIR/lpoptions"
+	fi
+	: >"$BACKUP_DIR/mac-settings.saved"
+}
+
+do_undo() {
+	local dir f q
+	dir=$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '2*' ! -name '*.undone' 2>/dev/null | sort | tail -1)
+	if [ -z "$dir" ]; then
+		say "Nothing to undo: no saved settings in $BACKUP_ROOT"
+		return 0
+	fi
+	say "Putting back the settings saved in"
+	say "  $dir"
+	[ -f "$dir/changes.log" ] && { say ""; say "Changes made that time:"; sed 's/^/  /' "$dir/changes.log"; }
+	if ! offer_undo "Put these back?"; then
+		say "Nothing changed."
+		return 0
+	fi
+	for f in "$dir"/queue-*.uri; do
+		[ -e "$f" ] || continue
+		q=${f##*/queue-}
+		q=${q%.uri}
+		heading "$q"
+		if ! queue_exists "$q"; then
+			warn "This queue no longer exists, skipped"
+			continue
+		fi
+		run lpadmin -p "$q" -v "$(cat "$f")" && ok "Address put back: $(cat "$f")"
+		if [ -f "$dir/queue-$q.ppd" ]; then
+			run lpadmin -p "$q" -P "$dir/queue-$q.ppd" && ok "Driver file put back"
+		fi
+		if [ -s "$dir/queue-$q.shared" ]; then
+			run lpadmin -p "$q" -o "printer-is-shared=$(cat "$dir/queue-$q.shared")" && ok "Sharing put back"
+		fi
+	done
+	if [ -f "$dir/mac-settings.saved" ]; then
+		heading "This Mac"
+		if [ -f "$dir/PrintingPrefs.plist" ]; then
+			run defaults import org.cups.PrintingPrefs "$dir/PrintingPrefs.plist" && ok "Default printer setting put back"
+		else
+			# There were no saved settings, which means macOS was on its
+			# factory choice: "Last Printer Used".
+			run defaults write org.cups.PrintingPrefs UseLastPrinter -bool true && ok "Default printer set back to Last Printer Used"
+		fi
+		if [ -f "$dir/lpoptions" ]; then
+			cp "$dir/lpoptions" "$HOME/.cups/lpoptions" && ok "Your saved printer options put back"
+		elif [ -f "$HOME/.cups/lpoptions" ]; then
+			# The file didn't exist before. Move it aside rather than delete it.
+			mv "$HOME/.cups/lpoptions" "$HOME/.cups/lpoptions.before-undo" && ok "Your printer options file moved aside (~/.cups/lpoptions.before-undo)"
+		fi
+	fi
+	mv "$dir" "$dir.undone"
+	say ""
+	say "Queues that were resumed stay resumed, and cancelled jobs stay cancelled."
+	say "Done. Running --undo again goes one more fix back."
+}
+
+offer_undo() {
+	if [ "$ASSUME_YES" = 1 ]; then return 0; fi
+	ask "$1"
+}
+
+# --- reading the print system ---
+
+list_queues() { lpstat -v 2>/dev/null | sed -n 's/^device for \([^:]*\): .*/\1/p'; }
+queue_uri()   { lpstat -v "$1" 2>/dev/null | sed -n 's/^device for [^:]*: //p' | head -1; }
+queue_exists() { [ -n "$(queue_uri "$1")" ]; }
+
+# One option of a queue, for options whose values have no spaces.
+queue_opt() { lpoptions -p "$1" 2>/dev/null | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1; }
+
+ppd_value() { sed -n "s/^\*$2: *//p" "$1" 2>/dev/null | head -1 | tr -d '"'; }
+
+# Turn %20 and friends back into the characters they stand for.
+urldecode() {
+	local s="${1//+/ }"
+	printf '%b' "${s//%/\\x}"
+}
+
+# Printers add a tag to their network name when they find it taken, like
+# "Canon MF645C (1a:2b:3c)" or "HP LaserJet (2)". This removes the tags,
+# and any garbage after them, giving the name the printer started with.
+strip_clash() {
+	printf '%s' "$1" | sed -E 's/ \(([0-9A-Fa-f]{2}:|[0-9]+\)).*$//'
+}
+
+# Work out what kind of address a queue uses. Sets LINK_KIND to one of:
+#   bonjour   the printer's Bonjour name (breaks when the printer renames itself)
+#   hostname  a .local host name (stays put)
+#   ip        a fixed IP address
+#   dns       a normal DNS name
+#   local     USB or anything else that isn't on the network
+parse_uri() {
+	local uri=$1 rest hostport
+	LINK_KIND=local LINK_NAME="" LINK_TYPE="" LINK_UUID="" LINK_HOST="" LINK_PORT=""
+	LINK_SCHEME=${uri%%://*}
+	rest=${uri#*://}
+	case "$uri" in
+	*"?uuid="*) LINK_UUID=$(printf '%s' "${uri##*\?uuid=}" | sed 's/&.*//' | tr 'A-F' 'a-f') ;;
+	esac
+	case "$rest" in
+	*._ipps._tcp.*) LINK_TYPE=_ipps._tcp ;;
+	*._ipp._tcp.*) LINK_TYPE=_ipp._tcp ;;
+	*._pdl-datastream._tcp.*) LINK_TYPE=_pdl-datastream._tcp ;;
+	*._printer._tcp.*) LINK_TYPE=_printer._tcp ;;
+	esac
+	if [ -n "$LINK_TYPE" ]; then
+		# Both dnssd://NAME._ipps._tcp.local./ and ipp://NAME._ipp._tcp.local./
+		# are Bonjour-name links; macOS writes both kinds.
+		LINK_KIND=bonjour
+		LINK_NAME=$(urldecode "${rest%%."$LINK_TYPE"*}")
+		return
+	fi
+	case "$LINK_SCHEME" in ipp | ipps | http | https | socket | lpd) ;; *) return ;; esac
+	hostport=${rest%%/*}
+	hostport=${hostport##*@}
+	if [ "${hostport#\[}" != "$hostport" ]; then
+		LINK_HOST=${hostport#\[}
+		LINK_HOST=${LINK_HOST%%\]*}
+		case "$hostport" in *\]:*) LINK_PORT=${hostport##*\]:} ;; esac
+		LINK_KIND=ip
+		return
+	fi
+	LINK_HOST=${hostport%%:*}
+	LINK_HOST=${LINK_HOST%.}
+	case "$hostport" in *:*) LINK_PORT=${hostport##*:} ;; esac
+	case "$LINK_HOST" in
+	*.local) LINK_KIND=hostname ;;
+	*[!0-9.]*) LINK_KIND=dns ;;
+	*) LINK_KIND=ip ;;
+	esac
+}
+
+default_port() {
+	case "$1" in
+	ipp | ipps) echo 631 ;;
+	socket) echo 9100 ;;
+	lpd) echo 515 ;;
+	http) echo 80 ;;
+	https) echo 443 ;;
+	esac
+}
+
+reachable() { nc -z -G 2 "$1" "$2" >/dev/null 2>&1; }
+
+# The paper names the printer uses, turned into the names the Mac uses.
+media_to_ppd() {
+	case "$1" in
+	iso_a4_210x297mm) echo A4 ;;
+	iso_a5_148x210mm) echo A5 ;;
+	jis_b5_182x257mm) echo B5 ;;
+	na_letter_8.5x11in) echo Letter ;;
+	na_legal_8.5x14in) echo Legal ;;
+	esac
+}
+
+# Is this a valid language code like "en" or "en-us"? Some printers send
+# "en-  " (with spaces), which macOS and Linux reject.
+valid_language() { printf '%s' "$1" | grep -Eq '^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$'; }
+
+# Plain words for the status codes printers send.
+plain_reason() {
+	local base=${1%-error}
+	base=${base%-warning}
+	base=${base%-report}
+	case "$base" in
+	media-empty | media-needed) echo "out of paper" ;;
+	media-jam) echo "paper jam" ;;
+	toner-empty | marker-supply-empty) echo "toner or ink empty" ;;
+	toner-low | marker-supply-low) echo "toner or ink low" ;;
+	door-open | cover-open) echo "a door or cover is open" ;;
+	input-tray-missing) echo "a paper tray is missing" ;;
+	marker-waste-full | marker-waste-almost-full) echo "waste toner or ink box full" ;;
+	offline) echo "the printer says it is offline" ;;
+	paused) echo "paused on the printer itself" ;;
+	*) echo "$base" ;;
+	esac
+}
+
+# --- finding printers on the network ---
+
+# One line per printer service: uuid|address|bonjour name|host name|model|admin page
+discover() {
+	local me
+	FOUND="$TMPD/found.txt"
+	# Leave out printers this Mac shares itself: they aren't real printers.
+	me="$(scutil --get LocalHostName 2>/dev/null).local"
+	ippfind -T "$TIMEOUT" _ipps._tcp _ipp._tcp \
+		-x echo '{txt_UUID}|{service_uri}|{service_name}|{service_hostname}|{txt_ty}|{txt_adminurl}' \; 2>/dev/null |
+		awk -F'|' -v me="$me" 'BEGIN { OFS = "|" }
+			{ $1 = tolower($1); sub(/\.$/, "", $4) }
+			tolower($4) != tolower(me) { print }' |
+		sort -u >"$FOUND"
+}
+
+field() { printf '%s' "$2" | cut -d'|' -f"$1"; }
+
+# Lines of the found list where field $1 equals $2 (ignoring case).
+found_lines() {
+	awk -F'|' -v f="$1" -v v="$2" 'tolower($f) == tolower(v)' "$FOUND"
+}
+
+# From the lines on stdin, prefer the one using address type $1 (ipp or ipps).
+pick_scheme() {
+	local lines
+	lines=$(cat)
+	[ -n "$lines" ] || return 0
+	printf '%s\n' "$lines" | awk -F'|' -v w="$1://" 'index($2, w) == 1 { print; exit }' | grep . ||
+		printf '%s\n' "$lines" | head -1
+}
+
+# --- checks for one queue ---
+
+# Find the printer a queue points at. Prints nothing; sets LINK_STATUS,
+# PRINTER_LINE (its line in the found list), PRINTER_URI (where to ask it
+# about itself) and NEW_URI (a host-name address to switch to, if useful).
+resolve_link() {
+	local uri=$1 want base line n port
+	parse_uri "$uri"
+	LINK_STATUS="" PRINTER_LINE="" PRINTER_URI="" NEW_URI=""
+	case "$LINK_SCHEME" in ipp | ipps) want=$LINK_SCHEME ;; *) want=ipps ;; esac
+
+	case "$LINK_KIND" in
+	bonjour)
+		[ "$LINK_TYPE" = _ipp._tcp ] && want=ipp
+		[ "$LINK_TYPE" = _ipps._tcp ] && want=ipps
+		if [ -n "$LINK_UUID" ]; then
+			PRINTER_LINE=$(found_lines 1 "$LINK_UUID" | pick_scheme "$want")
+		fi
+		if [ -z "$PRINTER_LINE" ]; then
+			PRINTER_LINE=$(found_lines 3 "$LINK_NAME" | pick_scheme "$want")
+		fi
+		if [ -z "$PRINTER_LINE" ]; then
+			# No exact match. Look for a printer whose name is the same once
+			# the clash tags are taken off, but only if exactly one fits, so
+			# two identical office printers can't be mixed up.
+			base=$(strip_clash "$LINK_NAME")
+			line=$(while IFS= read -r line; do
+				n=$(field 3 "$line")
+				[ "$(strip_clash "$n")" = "$base" ] && printf '%s\n' "$line"
+			done <"$FOUND")
+			if [ -n "$line" ]; then
+				if [ "$(printf '%s\n' "$line" | cut -d'|' -f1 | sort -u | grep -c .)" -gt 1 ]; then
+					LINK_STATUS=ambiguous
+					return
+				fi
+				PRINTER_LINE=$(printf '%s\n' "$line" | pick_scheme "$want")
+			fi
+		fi
+		if [ -z "$PRINTER_LINE" ]; then
+			LINK_STATUS=missing
+			return
+		fi
+		PRINTER_URI=$(field 2 "$PRINTER_LINE")
+		case "$LINK_TYPE" in
+		_ipp._tcp | _ipps._tcp) NEW_URI=$PRINTER_URI ;;
+		*)
+			LINK_STATUS=nonipp
+			return
+			;;
+		esac
+		n=$(field 3 "$PRINTER_LINE")
+		if [ "$n" != "$LINK_NAME" ]; then
+			LINK_STATUS=renamed
+		elif [ "$n" != "$(strip_clash "$n")" ]; then
+			LINK_STATUS=tagged
+		else
+			LINK_STATUS=bonjour_ok
+		fi
+		;;
+	hostname)
+		PRINTER_LINE=$(found_lines 4 "$LINK_HOST" | pick_scheme "$want")
+		port=${LINK_PORT:-$(default_port "$LINK_SCHEME")}
+		case "$LINK_SCHEME" in ipp | ipps) PRINTER_URI=$uri ;; esac
+		if [ -n "$PRINTER_LINE" ] || reachable "$LINK_HOST" "$port"; then
+			LINK_STATUS=host_ok
+		else
+			LINK_STATUS=host_missing
+		fi
+		;;
+	ip | dns)
+		port=${LINK_PORT:-$(default_port "$LINK_SCHEME")}
+		if reachable "$LINK_HOST" "$port"; then
+			LINK_STATUS=${LINK_KIND}_ok
+			case "$LINK_SCHEME" in ipp | ipps) PRINTER_URI=$uri ;; esac
+		else
+			LINK_STATUS=${LINK_KIND}_dead
+		fi
+		;;
+	*) LINK_STATUS=local ;;
+	esac
+}
+
+# Ask the printer about itself (name, paper, firmware, errors).
+fetch_attrs() {
+	ATTRS="$TMPD/attrs-$1.txt"
+	: >"$ATTRS"
+	ANSWERED=0 BAD_TAG=0
+	case "$PRINTER_URI" in ipp://* | ipps://*) ;; *) return ;; esac
+	ipptool -T "$TIMEOUT" -tv "$PRINTER_URI" get-printer-attributes.test >"$ATTRS" 2>&1
+	grep -q 'printer-state (enum)' "$ATTRS" && ANSWERED=1
+	if grep -q 'Bad naturalLanguage' "$ATTRS"; then
+		BAD_TAG=1
+	elif [ "$ANSWERED" = 1 ] && ! valid_language "$(attr natural-language-configured)"; then
+		BAD_TAG=1
+	fi
+	# A queue on a fixed IP address: the printer's own id tells us which
+	# Bonjour entry it is, so we can offer its host name.
+	if [ -z "$PRINTER_LINE" ] && [ "$ANSWERED" = 1 ]; then
+		local id
+		id=$(attr printer-uuid | sed 's/^urn:uuid://' | tr 'A-F' 'a-f')
+		[ -n "$id" ] && PRINTER_LINE=$(found_lines 1 "$id" | pick_scheme "$LINK_SCHEME")
+	fi
+}
+
+attr() { sed -n "s/^ *$1 ([^)]*) = //p" "$ATTRS" 2>/dev/null | head -1; }
+
+# Offer to switch a queue to the printer's host name.
+offer_repoint() {
+	local q=$1
+	[ -n "$NEW_URI" ] || return 0
+	detail "$(fix_label): point the queue at the printer's host name instead: $NEW_URI"
+	if offer "Switch $q to $NEW_URI?"; then
+		backup_queue "$q" && run lpadmin -p "$q" -v "$NEW_URI" && fixed "Queue now uses $NEW_URI" &&
+			LINK_STATUS=repointed PRINTER_URI=$NEW_URI
+	fi
+}
+
+report_link() {
+	local q=$1 now line pick labels
+	case "$LINK_STATUS" in
+	renamed)
+		now=$(field 3 "$PRINTER_LINE")
+		problem "Offline: the printer renamed itself and this queue still looks for the old name"
+		detail "Queue looks for:  \"$LINK_NAME\""
+		detail "Printer is now:   \"$now\""
+		offer_repoint "$q"
+		;;
+	tagged)
+		warn "Linked by a Bonjour name that already carries a clash tag: \"$LINK_NAME\""
+		detail "Printers add tags like (1a:2b:3c) or (2) when they find their name taken."
+		detail "The next rename takes this queue offline."
+		offer_repoint "$q"
+		;;
+	bonjour_ok)
+		ok "Linked by its Bonjour name \"$LINK_NAME\""
+		tip "If the printer ever renames itself, this queue goes Offline. Its host name doesn't change."
+		offer_repoint "$q"
+		;;
+	missing)
+		problem "Can't see this printer on the network"
+		detail "The queue looks for \"$LINK_NAME\"."
+		detail "If it is switched off or asleep, wake it and run this again."
+		detail "If it belongs to another network (an office), ignore this."
+		;;
+	ambiguous)
+		problem "Can't tell which printer this queue means"
+		detail "It looks for \"$LINK_NAME\", and more than one printer here has that name."
+		detail "Remove it in System Settings › Printers & Scanners and add the right one again."
+		;;
+	nonipp)
+		ok "Linked by its Bonjour name \"$LINK_NAME\" (${LINK_TYPE%%._tcp})"
+		tip "This queue uses a vendor driver, so airprint-doctor leaves its address alone."
+		;;
+	host_ok) ok "Linked by host name $LINK_HOST, which stays put when the printer renames itself" ;;
+	host_missing)
+		problem "Can't reach $LINK_HOST"
+		detail "If the printer is switched off or asleep, wake it and run this again."
+		;;
+	ip_ok)
+		ok "Linked by IP address $LINK_HOST, which answers"
+		tip "That only keeps working while your router gives the printer the same address (a \"DHCP reservation\")."
+		if [ -n "$PRINTER_LINE" ] && { [ "$LINK_SCHEME" = ipp ] || [ "$LINK_SCHEME" = ipps ]; }; then
+			NEW_URI=$(field 2 "$PRINTER_LINE")
+			offer_repoint "$q"
+		fi
+		;;
+	ip_dead | dns_dead)
+		problem "Nothing answers at $LINK_HOST"
+		if [ "$LINK_KIND" = ip ]; then
+			detail "The printer has probably been given a new address by the router."
+		fi
+		case "$LINK_SCHEME" in
+		ipp | ipps)
+			detail "$(fix_label): point the queue at the right printer from the ones on the network."
+			if [ -s "$FOUND" ] && [ "$MODE" = fix ]; then
+				labels=()
+				while IFS= read -r line; do
+					labels+=("$(field 5 "$line") · $(field 2 "$line")")
+				done < <(sort -t'|' -k1,1 -u "$FOUND")
+				pick=$(choose "Which of the printers on the network is it" "${labels[@]}")
+				if [ -n "$pick" ]; then
+					NEW_URI=${pick##* · }
+					backup_queue "$q" && run lpadmin -p "$q" -v "$NEW_URI" && fixed "Queue now uses $NEW_URI" &&
+						LINK_STATUS=repointed
+				fi
+			fi
+			;;
+		*) detail "Remove it in System Settings › Printers & Scanners and add the printer again." ;;
+		esac
+		;;
+	dns_ok) ok "Linked by $LINK_HOST, which answers" ;;
+	local) ok "Connected directly ($LINK_SCHEME), so there is no network link to check" ;;
+	esac
+}
+
+check_answer() {
+	local reasons r any=0
+	case "$LINK_STATUS" in missing | ambiguous | host_missing | ip_dead | dns_dead | local | "") return ;; esac
+	[ -n "$PRINTER_URI" ] || return
+	if [ "$ANSWERED" = 0 ]; then
+		tip "The printer didn't answer within ${TIMEOUT}s. If it is asleep, wake it and run this again."
+		return
+	fi
+	reasons=$(attr printer-state-reasons)
+	for r in $(printf '%s' "$reasons" | tr ',' ' '); do
+		case "$r" in
+		none | *-report) ;;
+		*-warning)
+			tip "The printer says: $(plain_reason "$r") ($r)"
+			any=1
+			;;
+		*)
+			problem "The printer says: $(plain_reason "$r") ($r)"
+			detail "This needs sorting out at the printer itself."
+			any=1
+			;;
+		esac
+	done
+	[ "$any" = 0 ] && ok "The printer answers and reports no errors"
+}
+
+check_paper() {
+	local q=$1 ppd="/etc/cups/ppd/$1.ppd" sizes def pdef psizes
+	[ -r "$ppd" ] || return
+	sizes=$(grep -c '^\*PageSize ' "$ppd")
+	def=$(ppd_value "$ppd" DefaultPageSize)
+	psizes=$(attr media-supported | tr ',' '\n' | grep -vc '^custom_')
+	if grep -q 'there are no paper sizes' "$ppd" || [ "$sizes" -le 1 ]; then
+		problem "Paper list is broken: this Mac only offers ${def:-one size}"
+		detail "When macOS added the printer it couldn't read the printer's paper list, so it"
+		detail "fell back to US Letter only. Letter jobs on A4 paper make many printers stop"
+		detail "and ask for paper."
+		if [ "$BAD_TAG" = 1 ]; then
+			detail "Cause: the printer sends a broken language code (\"$(attr natural-language-configured)\"),"
+			detail "which macOS rejects. This is a firmware bug, so the fix is on the printer:"
+			detail "  1. Update the printer's firmware, or"
+			detail "  2. change its Country/Region setting (on some Canon models that alone fixes it)."
+			detail "Then run airprint-doctor --fix again to rebuild the paper list."
+		elif [ "$ANSWERED" = 1 ]; then
+			case "$LINK_STATUS" in
+			renamed | missing | ambiguous | host_missing | ip_dead | dns_dead)
+				detail "$(fix_label): the printer answers cleanly (${psizes:-?} paper sizes), but this queue's"
+				detail "address is broken (see above). Fix that first, then the list can be rebuilt."
+				;;
+			*)
+				detail "$(fix_label): the printer answers cleanly now (${psizes:-?} paper sizes), so the list can be rebuilt."
+				if offer "Rebuild the paper list for $q from the printer?"; then
+					rebuild_ppd "$q"
+				fi
+				;;
+			esac
+		else
+			detail "Wake the printer and run this again, so the list can be rebuilt from it."
+		fi
+		return
+	fi
+	ok "Paper sizes: $sizes, default ${def:-not set}"
+	pdef=$(media_to_ppd "$(attr media-default)")
+	if [ -n "$pdef" ] && [ -n "$def" ] && [ "$pdef" != "$def" ] && grep -q "^\*PageSize $pdef:" "$ppd"; then
+		warn "Default paper here is $def, but the printer is set up for $pdef"
+		detail "Jobs on the wrong size make many printers stop and ask for paper."
+		detail "$(fix_label): make $pdef the default for this queue."
+		if offer "Make $pdef the default paper for $q?"; then
+			backup_queue "$q" && run lpadmin -p "$q" -o "PageSize=$pdef" && fixed "Default paper is now $pdef"
+		fi
+	fi
+}
+
+# Build a fresh driver file from what the printer says about itself, the
+# "IPP Everywhere" way. Apple's own files also carry the printer's icon and
+# the link to its scanner; those lines are copied over so nothing is lost.
+rebuild_ppd() {
+	local q=$1 ppd="/etc/cups/ppd/$1.ppd" old="$TMPD/old-$1.ppd" new="$TMPD/new-$1.ppd" duplex line key sizes
+	backup_queue "$q" || return 1
+	cp "$ppd" "$old" 2>/dev/null
+	duplex=$(ppd_value "$old" DefaultDuplex)
+	# lpadmin only builds the file itself when it is given the address on
+	# the same command, so pass the queue's own address back to it.
+	run lpadmin -p "$q" -v "$(queue_uri "$q")" -m everywhere || return 1
+	if cp "$ppd" "$new" 2>/dev/null; then
+		: >"$TMPD/extras"
+		grep -E '^\*(APAirPrint|APPrinterIconPath|APScanner[A-Za-z]*|APScanApp[A-Za-z]*|APICADriver):' "$old" 2>/dev/null |
+			while IFS= read -r line; do
+				key=${line%%:*}
+				grep -qF -- "$key:" "$new" || printf '%s\n' "$line"
+			done >"$TMPD/extras"
+		if [ -s "$TMPD/extras" ]; then
+			{
+				printf '*%% Carried over by airprint-doctor from the previous driver file\n'
+				cat "$TMPD/extras"
+			} >>"$new"
+			run lpadmin -p "$q" -P "$new" ||
+				detail "The icon and Scan button weren't carried over. Re-adding the printer in System Settings brings them back."
+		fi
+	fi
+	if [ -n "$duplex" ] && [ "$duplex" != None ] && grep -q "^\*Duplex $duplex:" "$ppd"; then
+		run lpadmin -p "$q" -o "Duplex=$duplex"
+	fi
+	sizes=$(grep -c '^\*PageSize ' "$ppd")
+	if [ "$sizes" -gt 1 ]; then
+		fixed "Paper list rebuilt: $sizes sizes, default $(ppd_value "$ppd" DefaultPageSize)"
+	else
+		detail "The rebuilt list still has only one size. The printer itself needs fixing first (see above)."
+	fi
+}
+
+check_sharing() {
+	local q=$1
+	case "$LINK_KIND" in local) return ;; esac
+	if [ "$(queue_opt "$q" printer-is-shared)" = true ] && [ "$SHARING_ON" = 1 ]; then
+		warn "This Mac shares the printer again, so phones and other computers see it twice"
+		detail "The copy that goes through this Mac stops working whenever the Mac sleeps."
+		detail "$(fix_label): stop sharing it from this Mac. The printer still shows up on its own."
+		if offer "Stop sharing $q from this Mac?"; then
+			backup_queue "$q" && run lpadmin -p "$q" -o printer-is-shared=false && fixed "No longer shared from this Mac"
+		fi
+	else
+		ok "Not shared again by this Mac"
+	fi
+}
+
+check_queue_state() {
+	local q=$1 state accepting jobs n clean=1
+	state=$(queue_opt "$q" printer-state)
+	accepting=$(queue_opt "$q" printer-is-accepting-jobs)
+	if [ "$state" = 5 ]; then
+		clean=0
+		problem "Queue is paused on this Mac"
+		detail "macOS pauses a queue after a printing error and leaves it paused."
+		detail "$(fix_label): resume it."
+		offer "Resume $q?" && run cupsenable "$q" && fixed "Resumed"
+	fi
+	if [ "$accepting" = false ]; then
+		clean=0
+		problem "Queue is refusing new jobs"
+		detail "$(fix_label): let it accept jobs again."
+		offer "Let $q accept jobs?" && run cupsaccept "$q" && fixed "Accepting jobs again"
+	fi
+	jobs=$(lpstat -o "$q" 2>/dev/null)
+	n=$(printf '%s' "$jobs" | grep -c .)
+	if [ "$n" -gt 0 ]; then
+		clean=0
+		warn "$n job(s) waiting in the queue"
+		printf '%s\n' "$jobs" | head -3 | while IFS= read -r line; do detail "$line"; done
+		detail "If they have been there a while, they are stuck and block new jobs."
+		if offer_careful "Cancel all $n waiting job(s) on $q? They will not print."; then
+			run cancel -a "$q" && fixed "Waiting jobs cancelled"
+		fi
+	fi
+	[ "$clean" = 1 ] && ok "Not paused, nothing stuck in the queue"
+}
+
+check_printer_name() {
+	local name host
+	name=$(attr printer-dns-sd-name)
+	[ -n "$name" ] || name=$(field 3 "$PRINTER_LINE")
+	[ -n "$name" ] || return
+	[ "$name" != "$(strip_clash "$name")" ] || return
+	host=$(field 4 "$PRINTER_LINE")
+	warn "The printer's own network name carries clash tags: \"$name\""
+	detail "Rename it to \"$(strip_clash "$name")\" on the printer's web page${host:+ (http://$host)},"
+	detail "usually under Network › Bonjour (mDNS) or AirPrint. It can't be done from the Mac."
+	detail "It renames itself when it drops off the network and comes back while its"
+	detail "old name is still remembered. A cable, a stronger Wi-Fi spot or a reserved"
+	detail "address on the router makes this rarer."
+}
+
+check_queue() {
+	local q=$1 uri model fw key
+	uri=$(queue_uri "$q")
+	resolve_link "$uri"
+	fetch_attrs "$q"
+	model=$(field 5 "$PRINTER_LINE")
+	[ -n "$model" ] || model=$(attr printer-make-and-model)
+	[ -n "$model" ] || model=$(ppd_value "/etc/cups/ppd/$q.ppd" NickName)
+	fw=$(attr printer-firmware-string-version)
+	heading "$q" "$model${fw:+ · firmware $fw}"
+	report_link "$q"
+	check_answer
+	check_paper "$q"
+	check_sharing "$q"
+	check_queue_state "$q"
+	check_printer_name
+	key=$(field 1 "$PRINTER_LINE")
+	[ -n "$key" ] || key=$LINK_HOST
+	[ -n "$key" ] && SEEN+=("$key|$q")
+}
+
+# --- checks for the Mac as a whole ---
+
+check_default_printer() {
+	local use_last current ids stale="" distinct id queues pick
+	queues=$(list_queues)
+	use_last=$(defaults read org.cups.PrintingPrefs UseLastPrinter 2>/dev/null) || use_last=1
+	current=$(lpstat -d 2>/dev/null | sed -n 's/^system default destination: //p')
+	ids=$(defaults read org.cups.PrintingPrefs LastUsedPrinters 2>/dev/null |
+		sed -n 's/^ *PrinterID = "\{0,1\}\([^";]*\)"\{0,1\};$/\1/p' | sort -u)
+	for id in $ids; do
+		printf '%s\n' "$queues" | grep -qxF -- "$id" || stale="$stale${stale:+, }$id"
+	done
+	distinct=$(printf '%s' "$ids" | grep -c .)
+
+	if [ "$use_last" = 1 ]; then
+		if [ -n "$stale" ] || [ "$distinct" -gt 1 ]; then
+			warn "Default printer is \"Last Printer Used\", which changes with the network"
+			detail "macOS remembers one printer per network it has been on. After a router"
+			detail "change, prints can quietly go to a different printer than you expect."
+			if [ -n "$stale" ]; then
+				detail "It still remembers $(printf '%s' "$stale" | tr ',' '\n' | grep -c .) printer(s) you no longer have:"
+				# Their names stay out of --report: they can be personal.
+				if [ "$MODE" != report ]; then
+					printf '%s\n' "$stale" | fold -s -w 70 | sed "s/ *\$//" | while IFS= read -r line; do detail "  $line"; done
+				fi
+			fi
+		else
+			tip "Default printer is \"Last Printer Used\", so it follows whichever network you are on"
+		fi
+	elif [ -z "$current" ] || ! printf '%s\n' "$queues" | grep -qxF -- "$current"; then
+		problem "No working default printer is set"
+	else
+		ok "Default printer: $current"
+		return
+	fi
+	[ -n "$queues" ] || return
+	detail "$(fix_label): pick one fixed default printer."
+	# shellcheck disable=SC2086  # one queue name per word is what we want here
+	pick=$(choose "Make which printer the default" $queues)
+	[ -n "$pick" ] || return
+	if [ "$(id -u)" = 0 ]; then
+		detail "Skipped: run airprint-doctor without sudo for this, it is a per-person setting."
+		return
+	fi
+	backup_mac_settings &&
+		run defaults write org.cups.PrintingPrefs UseLastPrinter -bool false &&
+		run lpoptions -d "$pick" &&
+		fixed "Default printer is now $pick, whatever network you are on"
+}
+
+check_duplicates() {
+	local dups
+	[ ${#SEEN[@]} -gt 1 ] || return
+	dups=$(printf '%s\n' "${SEEN[@]}" | awk -F'|' '
+		$1 != "" { q[$1] = q[$1] (q[$1] ? ", " : "") $2; n[$1]++ }
+		END { for (k in n) if (n[k] > 1) print q[k] }')
+	[ -n "$dups" ] || return
+	printf '%s\n' "$dups" | while IFS= read -r line; do
+		warn "More than one queue for the same printer: $line"
+	done
+	detail "Remove the ones you don't use in System Settings › Printers & Scanners."
+	detail "(airprint-doctor never deletes queues.)"
+}
+
+# --- the whole run ---
+
+list_found_printers() {
+	sort -t'|' -k1,1 -u "$FOUND" | while IFS= read -r line; do
+		detail "$(field 5 "$line") · \"$(field 3 "$line")\" · $(field 2 "$line")"
+	done
+}
+
+run_checks() {
+	local q queues found
+	say "airprint-doctor $VERSION · macOS $(sw_vers -productVersion 2>/dev/null) · CUPS $(cups-config --version 2>/dev/null || echo '?')"
+	say "Looking for printers on the network (${TIMEOUT}s)..."
+	discover
+	found=$(cut -d'|' -f1 "$FOUND" | sort -u | grep -c .)
+	say "Found $found printer(s) on the network."
+	SHARING_ON=$(cupsctl 2>/dev/null | sed -n 's/^_share_printers=//p')
+
+	queues=$(list_queues)
+	if [ -n "$ONLY_QUEUE" ]; then
+		if ! printf '%s\n' "$queues" | grep -qxF -- "$ONLY_QUEUE"; then
+			say ""
+			say "There is no queue called \"$ONLY_QUEUE\". These are set up:"
+			printf '%s\n' "$queues" | sed 's/^/  /'
+			return 2
+		fi
+		queues=$ONLY_QUEUE
+	fi
+	if [ -z "$queues" ]; then
+		say ""
+		say "No printers are set up on this Mac yet."
+		if [ "$found" -gt 0 ]; then
+			say "These are on the network:"
+			list_found_printers
+			say "Add one in System Settings › Printers & Scanners."
+		fi
+		return 0
+	fi
+
+	for q in $queues; do
+		check_queue "$q"
+	done
+
+	heading "This Mac"
+	check_default_printer
+	check_duplicates
+
+	say ""
+	if [ "$PROBLEMS" -le 0 ]; then
+		if [ "$FIXED" -gt 0 ]; then
+			say "${GREEN}All clear.${RESET} Fixed $FIXED problem(s)."
+		else
+			say "${GREEN}All clear.${RESET}"
+		fi
+	elif [ "$MODE" = fix ]; then
+		say "Fixed $FIXED, $PROBLEMS left. Those left need the printer itself or a choice from you (see above)."
+	else
+		say "$PROBLEMS problem(s) found. To repair them, run:  airprint-doctor --fix"
+		say "Each change asks first, and --undo puts things back."
+	fi
+	if [ -n "$BACKUP_DIR" ]; then
+		say "Old settings saved in: $BACKUP_DIR"
+		say "airprint-doctor --undo puts them back."
+	fi
+	[ "$PROBLEMS" -gt 0 ] && return 1
+	return 0
+}
+
+# Take out anything that could identify the person or their network, so
+# --report output can be pasted in public.
+redact() {
+	local args=() q i=1 esc
+	# Longest names first, and whole words only, so "Office" can't eat
+	# part of "Office_2".
+	for q in $(list_queues | awk '{ print length($0) " " $0 }' | sort -rn | cut -d" " -f2-); do
+		esc=$(printf '%s' "$q" | sed 's/[][\.*^$/]/\\&/g')
+		args+=(-e "s/[[:<:]]$esc[[:>:]]/printer-$i/g")
+		i=$((i + 1))
+	done
+	# Queue names go first, before the general rules below change them.
+	sed -E \
+		${args[@]+"${args[@]}"} \
+		-e 's/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/x.x.x.x/g' \
+		-e 's/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/<uuid>/g' \
+		-e 's/([0-9A-Fa-f]{2}:){2,5}[0-9A-Fa-f]{2}/xx:xx:xx/g' \
+		-e 's/([0-9A-Fa-f]{2}_){2,5}[0-9A-Fa-f]{2}/xx_xx_xx/g' \
+		-e 's/[A-Za-z0-9_-]+\.local/<printer>.local/g' \
+		-e "s#$HOME#~#g" \
+		-e "s/[[:<:]]$(id -un)[[:>:]]/<user>/g"
+}
+
+preflight() {
+	local c
+	if [ "$(uname -s)" != Darwin ]; then
+		say "airprint-doctor only runs on macOS."
+		exit 2
+	fi
+	for c in lpstat lpadmin lpoptions ippfind ipptool cupsenable cupsaccept cancel defaults nc; do
+		if ! command -v "$c" >/dev/null 2>&1; then
+			say "This Mac is missing the command \"$c\", which airprint-doctor needs."
+			exit 2
+		fi
+	done
+	TMPD=$(mktemp -d "${TMPDIR:-/tmp}/airprint-doctor.XXXXXX") || exit 2
+	# shellcheck disable=SC2064  # expand TMPD now, on purpose
+	trap "rm -rf '$TMPD'" EXIT
+}
+
+main() {
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--fix) MODE=fix ;;
+		--undo) MODE=undo ;;
+		--report) MODE=report ;;
+		-y | --yes) ASSUME_YES=1 ;;
+		-p | --printer)
+			shift
+			ONLY_QUEUE=${1:-}
+			;;
+		-t | --timeout)
+			shift
+			TIMEOUT=${1:-5}
+			case "$TIMEOUT" in '' | *[!0-9]*) say "--timeout needs a whole number of seconds"; exit 2 ;; esac
+			;;
+		--no-color) NO_COLOR=1 ;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		-V | --version)
+			say "airprint-doctor $VERSION"
+			exit 0
+			;;
+		*)
+			say "Unknown option: $1"
+			say ""
+			usage
+			exit 2
+			;;
+		esac
+		shift
+	done
+	setup_colors
+	preflight
+	case "$MODE" in
+	undo) do_undo ;;
+	report)
+		say "----- airprint-doctor report (names and addresses removed) -----"
+		run_checks 2>&1 | redact
+		say "----- end of report -----"
+		;;
+	*) run_checks ;;
+	esac
+}
+
+# The tests load this file to reach the functions without running anything.
+if [ -z "${AIRPRINT_DOCTOR_SOURCED:-}" ]; then
+	main "$@"
+fi
