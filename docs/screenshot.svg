@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="772" viewBox="0 0 960 772" role="img" aria-label="airprint-doctor terminal output">
+<title>airprint-doctor checking a Mac</title>
+<rect width="960" height="772" rx="10" fill="#1d1f21"/>
+<circle cx="20" cy="18" r="6" fill="#ff5f57"/><circle cx="40" cy="18" r="6" fill="#febc2e"/><circle cx="60" cy="18" r="6" fill="#28c840"/>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" fill="#d5d8d6">
+<text x="16" y="52"><tspan fill="#7fb2e6">$</tspan>&#160;./airprint-doctor</text>
+<text x="16" y="70">airprint-doctor&#160;1.0.0&#160;·&#160;macOS&#160;27.2&#160;·&#160;CUPS&#160;2.3.4</text>
+<text x="16" y="88">Looking&#160;for&#160;printers&#160;on&#160;the&#160;network&#160;(5s)...</text>
+<text x="16" y="106">Found&#160;1&#160;printer(s)&#160;on&#160;the&#160;network.</text>
+<text x="16" y="124"></text>
+<text x="16" y="142"><tspan font-weight="bold" fill="#ffffff">Office_Printer</tspan><tspan fill="#8a8f94">&#160;&#160;Canon&#160;MF645C&#160;·&#160;firmware&#160;15.01</tspan></text>
+<text x="16" y="160">&#160;&#160;<tspan fill="#f2777a">✗</tspan>&#160;Offline:&#160;the&#160;printer&#160;renamed&#160;itself&#160;and&#160;this&#160;queue&#160;still&#160;looks&#160;for&#160;the&#160;old&#160;name</text>
+<text x="16" y="178">&#160;&#160;&#160;&#160;&#160;&#160;Queue&#160;looks&#160;for:&#160;&#160;"Canon&#160;MF645C&#160;(1a:2b:3c)&#160;(1a:2b:3c)&#160;(1a:2b:3c)"</text>
+<text x="16" y="196">&#160;&#160;&#160;&#160;&#160;&#160;Printer&#160;is&#160;now:&#160;&#160;&#160;"Canon&#160;MF645C&#160;(1a:2b:3c)&#160;(1a:2b:3c)"</text>
+<text x="16" y="214">&#160;&#160;&#160;&#160;&#160;&#160;Fix:&#160;point&#160;the&#160;queue&#160;at&#160;the&#160;printer's&#160;host&#160;name&#160;instead:&#160;ipps://Canon1a2b3c.local:10443/ipp/print</text>
+<text x="16" y="232">&#160;&#160;<tspan fill="#99cc99">✓</tspan>&#160;The&#160;printer&#160;answers&#160;and&#160;reports&#160;no&#160;errors</text>
+<text x="16" y="250">&#160;&#160;<tspan fill="#f2777a">✗</tspan>&#160;Paper&#160;list&#160;is&#160;broken:&#160;this&#160;Mac&#160;only&#160;offers&#160;Letter</text>
+<text x="16" y="268">&#160;&#160;&#160;&#160;&#160;&#160;When&#160;macOS&#160;added&#160;the&#160;printer&#160;it&#160;couldn't&#160;read&#160;the&#160;printer's&#160;paper&#160;list,&#160;so&#160;it</text>
+<text x="16" y="286">&#160;&#160;&#160;&#160;&#160;&#160;fell&#160;back&#160;to&#160;US&#160;Letter&#160;only.&#160;Letter&#160;jobs&#160;on&#160;A4&#160;paper&#160;make&#160;many&#160;printers&#160;stop</text>
+<text x="16" y="304">&#160;&#160;&#160;&#160;&#160;&#160;and&#160;ask&#160;for&#160;paper.</text>
+<text x="16" y="322">&#160;&#160;&#160;&#160;&#160;&#160;Fix:&#160;the&#160;printer&#160;answers&#160;cleanly&#160;now&#160;(19&#160;paper&#160;sizes),&#160;so&#160;the&#160;list&#160;can&#160;be&#160;rebuilt.</text>
+<text x="16" y="340">&#160;&#160;<tspan fill="#f0c674">!</tspan>&#160;This&#160;Mac&#160;shares&#160;the&#160;printer&#160;again,&#160;so&#160;phones&#160;and&#160;other&#160;computers&#160;see&#160;it&#160;twice</text>
+<text x="16" y="358">&#160;&#160;&#160;&#160;&#160;&#160;The&#160;copy&#160;that&#160;goes&#160;through&#160;this&#160;Mac&#160;stops&#160;working&#160;whenever&#160;the&#160;Mac&#160;sleeps.</text>
+<text x="16" y="376">&#160;&#160;&#160;&#160;&#160;&#160;Fix:&#160;stop&#160;sharing&#160;it&#160;from&#160;this&#160;Mac.&#160;The&#160;printer&#160;still&#160;shows&#160;up&#160;on&#160;its&#160;own.</text>
+<text x="16" y="394">&#160;&#160;<tspan fill="#f2777a">✗</tspan>&#160;Queue&#160;is&#160;paused&#160;on&#160;this&#160;Mac</text>
+<text x="16" y="412">&#160;&#160;&#160;&#160;&#160;&#160;macOS&#160;pauses&#160;a&#160;queue&#160;after&#160;a&#160;printing&#160;error&#160;and&#160;leaves&#160;it&#160;paused.</text>
+<text x="16" y="430">&#160;&#160;&#160;&#160;&#160;&#160;Fix:&#160;resume&#160;it.</text>
+<text x="16" y="448">&#160;&#160;<tspan fill="#f0c674">!</tspan>&#160;The&#160;printer's&#160;own&#160;network&#160;name&#160;carries&#160;clash&#160;tags:&#160;"Canon&#160;MF645C&#160;(1a:2b:3c)&#160;(1a:2b:3c)"</text>
+<text x="16" y="466">&#160;&#160;&#160;&#160;&#160;&#160;Rename&#160;it&#160;to&#160;"Canon&#160;MF645C"&#160;on&#160;the&#160;printer's&#160;web&#160;page&#160;(http://Canon1a2b3c.local),</text>
+<text x="16" y="484">&#160;&#160;&#160;&#160;&#160;&#160;usually&#160;under&#160;Network&#160;›&#160;Bonjour&#160;(mDNS)&#160;or&#160;AirPrint.&#160;It&#160;can't&#160;be&#160;done&#160;from&#160;the&#160;Mac.</text>
+<text x="16" y="502">&#160;&#160;&#160;&#160;&#160;&#160;It&#160;renames&#160;itself&#160;when&#160;it&#160;drops&#160;off&#160;the&#160;network&#160;and&#160;comes&#160;back&#160;while&#160;its</text>
+<text x="16" y="520">&#160;&#160;&#160;&#160;&#160;&#160;old&#160;name&#160;is&#160;still&#160;remembered.&#160;A&#160;cable,&#160;a&#160;stronger&#160;Wi-Fi&#160;spot&#160;or&#160;a&#160;reserved</text>
+<text x="16" y="538">&#160;&#160;&#160;&#160;&#160;&#160;address&#160;on&#160;the&#160;router&#160;makes&#160;this&#160;rarer.</text>
+<text x="16" y="556"></text>
+<text x="16" y="574"><tspan font-weight="bold" fill="#ffffff">This&#160;Mac</tspan><tspan fill="#8a8f94"></tspan></text>
+<text x="16" y="592">&#160;&#160;<tspan fill="#f0c674">!</tspan>&#160;Default&#160;printer&#160;is&#160;"Last&#160;Printer&#160;Used",&#160;which&#160;changes&#160;with&#160;the&#160;network</text>
+<text x="16" y="610">&#160;&#160;&#160;&#160;&#160;&#160;macOS&#160;remembers&#160;one&#160;printer&#160;per&#160;network&#160;it&#160;has&#160;been&#160;on.&#160;After&#160;a&#160;router</text>
+<text x="16" y="628">&#160;&#160;&#160;&#160;&#160;&#160;change,&#160;prints&#160;can&#160;quietly&#160;go&#160;to&#160;a&#160;different&#160;printer&#160;than&#160;you&#160;expect.</text>
+<text x="16" y="646">&#160;&#160;&#160;&#160;&#160;&#160;It&#160;still&#160;remembers&#160;1&#160;printer(s)&#160;you&#160;no&#160;longer&#160;have:</text>
+<text x="16" y="664">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;Old_Office_HP</text>
+<text x="16" y="682">&#160;&#160;&#160;&#160;&#160;&#160;Fix:&#160;pick&#160;one&#160;fixed&#160;default&#160;printer.</text>
+<text x="16" y="700"></text>
+<text x="16" y="718">6&#160;problem(s)&#160;found.&#160;To&#160;repair&#160;them,&#160;run:&#160;&#160;airprint-doctor&#160;--fix</text>
+<text x="16" y="736">Each&#160;change&#160;asks&#160;first,&#160;and&#160;--undo&#160;puts&#160;things&#160;back.</text>
+</g></svg>
